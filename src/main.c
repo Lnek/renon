@@ -4,11 +4,11 @@
 
 int main(int argc, char *argv[]) {
     
-    ren_config_t config;
+    renon_config_t config;
     config.thread_num = 8;
     
-    ren_server_t *server = ren_server_create(&config);
-    while (ren_dispatcher_run(server->ren_dispatcher) > 0) {
+    renon_server_t *server = ren_server_create(&config);
+    while (ren_dispatcher_run(server->dispatcher) > 0) {
         
     }
     

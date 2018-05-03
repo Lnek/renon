@@ -1,3 +1,5 @@
+#include <errno.h>
+#include <string.h>
 #include <sys/epoll.h>
 #include "ren_event.h"
 #include "ren_log.h"
@@ -6,6 +8,7 @@
 #define INITIAL_NFILES 32
 #define INITIAL_NEVENTS 32
 #define MAX_NEVENTS 4096
+#define MAX_EPOLL_TIMEOUT_MSEC (35*60*1000)
 
 static void *epoll_init (struct renon_dispatcher_t *dispatcher);
 static int epoll_add (void *, struct renon_event_t *);
@@ -17,6 +20,7 @@ const struct renon_event_op_t epoll_ops = {
     epoll_init,
     epoll_add,
     epoll_del,
+    epoll_dispatch,
 };
 
 struct evepoll {
@@ -46,19 +50,19 @@ static void* epoll_init(struct renon_dispatcher_t *dispatcher) {
 
     epollop->epfd = epfd;
 
-    epollop->events = ren_alloc_array(INITIAL_NEVENTS * sizeof(struct epoll_event));
+    epollop->events = ren_alloc_array(struct epoll_event, INITIAL_NEVENTS * sizeof(struct epoll_event));
 
     if (epollop->events == NULL) {
-        free(epollop);
+        renon_free(epollop);
         return NULL;
     }
     epollop->nevents = INITIAL_NEVENTS;
 
-    epollop->fds = ren_alloc_array(INITIAL_NFILES * sizeof(struct evepoll));
+    epollop->fds = ren_alloc_array(struct evepoll, INITIAL_NFILES * sizeof(struct evepoll));
 
     if (epollop->fds == NULL) {
-        free(epollop->events);
-        free(epollop);
+        renon_free(epollop->events);
+        renon_free(epollop);
         return NULL;
     }
 
@@ -77,7 +81,7 @@ static int epoll_recalc(void *arg, int max) {
         nfds = epollop->nfds;
 
         while (nfds <= max) {
-            nfds << = 1;
+            nfds <<= 1;
         }
 
         fds = ren_realloc(epollop->fds, nfds * sizeof(struct evepoll));
@@ -101,7 +105,11 @@ static int epoll_add(void *arg, struct ren_event_t *event) {
 
     fd = event->fd;
     if (fd >= epollop->nfds) {
+        if (epoll_recalc(epollop, fd) == -1) {
+            return (-1);
+        }
     }
+
     evep = &(epollop->fds[fd]);
     op = EPOLL_CTL_ADD;
     events = 0;
@@ -116,11 +124,11 @@ static int epoll_add(void *arg, struct ren_event_t *event) {
         op = EPOLL_CTL_MOD;
     }
 
-    if (ev->events & EV_READ) {
+    if (event->events & RENON_READ) {
         events |= EPOLLIN;
     }
 
-    if (ev->events & EV_WRITE) {
+    if (event->events & RENON_WRITE) {
         events |= EPOLLOUT;
     }
 
@@ -128,21 +136,21 @@ static int epoll_add(void *arg, struct ren_event_t *event) {
     epev.events = events;
 
     if (epoll_ctl(epollop->epfd, op, ev->ev_fd, &epev) == -1) {
-        return -1;
+        return (-1);
     }
 
-    if (ev->ev_events & EV_READ) {
-        evep->evread = event;
+    if (event->events & RENON_READ) {
+        evep->read_event = event;
     }
 
-    if(ev->ev_events & EV_WRITE) {
-        evep->evwrite = event;
+    if(event->events & RENON_WRITE) {
+        evep->write_event = event;
     }
     return 0;
 }
 
-static int epoll_del(void *, struct ren_event_t *) {
-
+static int epoll_del(void *arg, struct ren_event_t *renon_event_t *event) {
+    return 1;
 }
 
 struct int epoll_dispatch(renon_dispatcher_t * dispatcher, void *arg, struct timeval *tv) {
@@ -163,11 +171,9 @@ struct int epoll_dispatch(renon_dispatcher_t * dispatcher, void *arg, struct tim
 
     if (res == -1) {
         if (errno != EINTR) {
-            event_warn("epoll_wait");
             return -1;
         }
 
-        evsignal_process(base);
         return 0;
     }
 
@@ -184,15 +190,15 @@ struct int epoll_dispatch(renon_dispatcher_t * dispatcher, void *arg, struct tim
         evep = &epollop->fds[fd];
 
         if (what & (EPOLLHUP|EPOLLERR)) {
-            read = evep->read;
-            write = evep->write;
+            read = evep->read_event;
+            write = evep->write_event;
         } else {
             if (what & EPOLLIN) {
-                read = evep->read;
+                read = evep->read_event;
             }
 
             if (what & EPOLLOUT) {
-                write = evep->write;
+                write = evep->write_event;
             }
         }
 
@@ -201,11 +207,11 @@ struct int epoll_dispatch(renon_dispatcher_t * dispatcher, void *arg, struct tim
         }
 
         if (read != NULL) {
-            event_active(evread, EV_READ, 1);
+            renon_event_active(read, RENON_READ, 1);
         }
 
         if (write != NULL) {
-            event_active(evwrite, EV_WRITE, 1);
+            renon_event_active(write, RENON_WRITE, 1);
         }
     }
 
